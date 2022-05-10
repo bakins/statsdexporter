@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/statsd_exporter/pkg/address"
 	"github.com/prometheus/statsd_exporter/pkg/mapper"
@@ -47,19 +46,23 @@ type config struct {
 
 func defaultConfig() config {
 	return config{
-		network:             "udp",
-		address:             "127.0.0.1:0",
-		unixSocketMode:      0o755,
-		mappingConfig:       "",
-		readBuffer:          0,
-		cacheSize:           1000,
-		cacheType:           "lru",
-		eventQueueSize:      10000,
-		eventFlushThreshold: 1000,
-		eventFlushInterval:  200 * time.Millisecond,
-		registerer:          prometheus.DefaultRegisterer,
-		gatherer:            prometheus.DefaultGatherer,
-		logger:              log.NewNopLogger(),
+		network:              "udp",
+		address:              "127.0.0.1:0",
+		unixSocketMode:       0o755,
+		mappingConfig:        "",
+		readBuffer:           0,
+		cacheSize:            1000,
+		cacheType:            "lru",
+		eventQueueSize:       10000,
+		eventFlushThreshold:  1000,
+		eventFlushInterval:   200 * time.Millisecond,
+		dogstatsdTagsEnabled: true,
+		influxdbTagsEnabled:  true,
+		libratoTagsEnabled:   true,
+		signalFXTagsEnabled:  true,
+		registerer:           prometheus.DefaultRegisterer,
+		gatherer:             prometheus.DefaultGatherer,
+		logger:               log.NewNopLogger(),
 	}
 }
 
@@ -71,8 +74,8 @@ func (f optionFunc) apply(c *config) error {
 
 // WithAddress sets the address for the listener. Default
 // is a random UDP port on localhost.
-func WithAddress(network string, addr string) optionFunc {
-	return func(c *config) error {
+func WithAddress(network string, addr string) Option {
+	return optionFunc(func(c *config) error {
 		// we wind up parsing addresses twice, but it's fine.
 		switch network {
 		case "tcp":
@@ -94,55 +97,55 @@ func WithAddress(network string, addr string) optionFunc {
 		c.address = addr
 
 		return nil
-	}
+	})
 }
 
 // WithUnixSocketMode sets the file mode when using a unix socket.
 // Default is 0o755
-func WithUnixSocketMode(mode os.FileMode) optionFunc {
-	return func(c *config) error {
+func WithUnixSocketMode(mode os.FileMode) Option {
+	return optionFunc(func(c *config) error {
 		c.unixSocketMode = mode
 
 		return nil
-	}
+	})
 }
 
 // WithMappingConfig sets the metric mapping configuration file name.
-func WithMappingConfig(configFile string) optionFunc {
-	return func(c *config) error {
+func WithMappingConfig(configFile string) Option {
+	return optionFunc(func(c *config) error {
 		c.mappingConfig = configFile
 
 		return nil
-	}
+	})
 }
 
 // WithReadBuffer sets the read buffer size (in bytes) of the operating system's
 // transmit read buffer associated with the UDP or Unixgram connection. Please
 // make sure the kernel parameters net.core.rmem_max is set to a value greater
 // than the value specified.
-func WithReadBuffer(size uint) optionFunc {
-	return func(c *config) error {
+func WithReadBuffer(size uint) Option {
+	return optionFunc(func(c *config) error {
 		c.readBuffer = size
 		return nil
-	}
+	})
 }
 
 // WithCacheSize sets the maximum size of your metric mapping cache.
 //
 // Default is 1000.
-func WithCacheSize(size uint) optionFunc {
-	return func(c *config) error {
+func WithCacheSize(size uint) Option {
+	return optionFunc(func(c *config) error {
 		c.cacheSize = size
 		return nil
-	}
+	})
 }
 
 // WithCacheType sets metric mapping cache type. Valid options are "lru" and
 // "random".
 //
 // Default is "lru".
-func WithCacheType(cacheType string) optionFunc {
-	return func(c *config) error {
+func WithCacheType(cacheType string) Option {
+	return optionFunc(func(c *config) error {
 		switch cacheType {
 		case "lru", "random":
 		default:
@@ -151,34 +154,34 @@ func WithCacheType(cacheType string) optionFunc {
 		c.cacheType = cacheType
 
 		return nil
-	}
+	})
 }
 
 // WithEventQueueSize sets the size of internal queue for processing events.
 //
 // Default is 10000.
-func WithEventQueueSize(size uint) optionFunc {
-	return func(c *config) error {
+func WithEventQueueSize(size uint) Option {
+	return optionFunc(func(c *config) error {
 		c.eventQueueSize = size
 		return nil
-	}
+	})
 }
 
 // WithEventFlushThreshold sets the number of events to hold in queue before flushing.
 //
 // Default is 1000.
-func WithEventFlushThreshold(size uint) optionFunc {
-	return func(c *config) error {
+func WithEventFlushThreshold(size uint) Option {
+	return optionFunc(func(c *config) error {
 		c.eventFlushThreshold = size
 		return nil
-	}
+	})
 }
 
 // WithEventFlushInterval sets the maximum time between event queue flushes.
 //
 // Default is 200ms
-func WithEventFlushInterval(interval time.Duration) optionFunc {
-	return func(c *config) error {
+func WithEventFlushInterval(interval time.Duration) Option {
+	return optionFunc(func(c *config) error {
 		if interval < 0 {
 			return errors.New("interval must be positive")
 		}
@@ -186,15 +189,77 @@ func WithEventFlushInterval(interval time.Duration) optionFunc {
 		c.eventFlushInterval = interval
 
 		return nil
-	}
+	})
+}
+
+// WithDogstatsdTagsEnabled sets whether to parse DogStatsd style tags.
+//
+// Default is true.
+func WithDogstatsdTagsEnabled(enabled bool) Option {
+	return optionFunc(func(c *config) error {
+		c.dogstatsdTagsEnabled = enabled
+		return nil
+	})
+}
+
+// WithInfluxdbTagsEnabled sets whether to parse InfluxDB style tags.
+//
+// Default is true.
+func WithInfluxdbTagsEnabled(enabled bool) Option {
+	return optionFunc(func(c *config) error {
+		c.influxdbTagsEnabled = enabled
+		return nil
+	})
+}
+
+// WithInfluxdbTagsEnabled sets whether to parse Librato style tags.
+//
+// Default is true.
+func WithLibratoTagsEnabled(enabled bool) Option {
+	return optionFunc(func(c *config) error {
+		c.libratoTagsEnabled = enabled
+		return nil
+	})
+}
+
+// WithInfluxdbTagsEnabled sets whether to parse SignalFX style tags.
+//
+// Default is true.
+func WithSignalFXTagsEnabled(enabled bool) Option {
+	return optionFunc(func(c *config) error {
+		c.signalFXTagsEnabled = enabled
+		return nil
+	})
+}
+
+// WithRegisterer sets the Registerer to sue for registering metrics.
+//
+// Default is prometheus.DefaultRegisterer.
+func WithRegisterer(registerer prometheus.Registerer) Option {
+	return optionFunc(func(c *config) error {
+		c.registerer = registerer
+		return nil
+	})
+}
+
+// WithGatherer sets the Gatherer to sue for registering metrics.
+// The gatherer and register should use the same underlying prometheus
+// registry for metrics to work as expected.
+//
+// Default is prometheus.DefaultGathererer.
+func WithRegWithGathereristerer(gatherer prometheus.Gatherer) Option {
+	return optionFunc(func(c *config) error {
+		c.gatherer = gatherer
+		return nil
+	})
 }
 
 // WithLogger sets the logger to use. A nop is used by default.
-func WithLogger(logger log.Logger) optionFunc {
-	return func(c *config) error {
+func WithLogger(logger log.Logger) Option {
+	return optionFunc(func(c *config) error {
 		c.logger = logger
 		return nil
-	}
+	})
 }
 
 // Server is a statsd server
@@ -241,27 +306,19 @@ func New(options ...Option) (*Server, error) {
 	return &s, nil
 }
 
-func getCache(cacheSize int, cacheType string, registerer prometheus.Registerer) (mapper.MetricMapperCache, error) {
-	var cache mapper.MetricMapperCache
-	var err error
+func getCache(cacheSize uint, cacheType string, registerer prometheus.Registerer) (mapper.MetricMapperCache, error) {
 	if cacheSize == 0 {
 		return nil, nil
-	} else {
-		switch cacheType {
-		case "lru":
-			cache, err = lru.NewMetricMapperLRUCache(registerer, cacheSize)
-		case "random":
-			cache, err = randomreplacement.NewMetricMapperRRCache(registerer, cacheSize)
-		default:
-			err = fmt.Errorf("unsupported cache type %q", cacheType)
-		}
-
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	return cache, nil
+	switch cacheType {
+	case "lru":
+		return lru.NewMetricMapperLRUCache(registerer, int(cacheSize))
+	case "random":
+		return randomreplacement.NewMetricMapperRRCache(registerer, int(cacheSize))
+	default:
+		return nil, fmt.Errorf("unsupported cache type %q", cacheType)
+	}
 }
 
 // WaitForAddress is useful when using a random port.
@@ -342,7 +399,7 @@ var (
 			Help: "The number of errors encountered reading from TCP.",
 		},
 	)
-	tcpLineTooLong = promauto.NewCounter(
+	tcpLineTooLong = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "statsd_exporter_tcp_too_long_lines_total",
 			Help: "The number of lines discarded due to being too long.",
@@ -424,4 +481,25 @@ var (
 		},
 		[]string{"type"},
 	)
+
+	// Metrics can be used to register metrics about the exporter itself
+	Metrics = []prometheus.Collector{
+		eventStats,
+		eventsFlushed,
+		eventsUnmapped,
+		udpPackets,
+		tcpConnections,
+		tcpErrors,
+		tcpLineTooLong,
+		unixgramPackets,
+		linesReceived,
+		samplesReceived,
+		sampleErrors,
+		tagsReceived,
+		tagErrors,
+		conflictingEventStats,
+		errorEventStats,
+		eventsActions,
+		metricsCount,
+	}
 )
