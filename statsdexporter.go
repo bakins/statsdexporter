@@ -14,6 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/statsd_exporter/pkg/address"
+	"github.com/prometheus/statsd_exporter/pkg/event"
+	"github.com/prometheus/statsd_exporter/pkg/exporter"
+	"github.com/prometheus/statsd_exporter/pkg/line"
+	"github.com/prometheus/statsd_exporter/pkg/listener"
 	"github.com/prometheus/statsd_exporter/pkg/mapper"
 	"github.com/prometheus/statsd_exporter/pkg/mappercache/lru"
 	"github.com/prometheus/statsd_exporter/pkg/mappercache/randomreplacement"
@@ -25,23 +29,23 @@ type Option interface {
 }
 
 type config struct {
-	network              string
-	address              string
-	unixSocketMode       os.FileMode
-	mappingConfig        string
-	readBuffer           uint
-	cacheSize            uint
+	gatherer             prometheus.Gatherer
+	registerer           prometheus.Registerer
+	logger               log.Logger
 	cacheType            string
+	address              string
+	mappingConfig        string
+	network              string
 	eventQueueSize       uint
-	eventFlushThreshold  uint
+	cacheSize            uint
 	eventFlushInterval   time.Duration
-	dogstatsdTagsEnabled bool
+	eventFlushThreshold  uint
+	readBuffer           uint
+	unixSocketMode       os.FileMode
 	influxdbTagsEnabled  bool
 	libratoTagsEnabled   bool
 	signalFXTagsEnabled  bool
-	registerer           prometheus.Registerer
-	gatherer             prometheus.Gatherer
-	logger               log.Logger
+	dogstatsdTagsEnabled bool
 }
 
 func defaultConfig() config {
@@ -264,10 +268,10 @@ func WithLogger(logger log.Logger) Option {
 
 // Server is a statsd server
 type Server struct {
-	config   config
-	mapper   *mapper.MetricMapper
-	handler  http.Handler
-	listener net.Listener
+	handler http.Handler
+	address net.Addr
+	mapper  *mapper.MetricMapper
+	config  config
 }
 
 func New(options ...Option) (*Server, error) {
@@ -332,11 +336,11 @@ func (s *Server) WaitForAddress(ctx context.Context) (net.Addr, error) {
 			return nil, ctx.Err()
 		case <-t.C:
 			// this is technically a race
-			if s.listener == nil {
+			if s.address == nil {
 				continue
 			}
 
-			return s.listener.Addr(), nil
+			return s.address, nil
 		}
 	}
 }
@@ -360,6 +364,101 @@ func (s *Server) Reload() error {
 // ServeHTTP can be used as an http Handler for /metrics
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
+}
+
+// Run until the context is cancelled.
+func (s *Server) Run(ctx context.Context) error {
+	// wrap context so we can control closing events, etc
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	events := make(chan event.Events, s.config.eventQueueSize)
+
+	go func() {
+		<-ctx.Done()
+		close(events)
+	}()
+
+	eventQueue := event.NewEventQueue(
+		events,
+		int(s.config.eventFlushThreshold),
+		s.config.eventFlushInterval,
+		eventsFlushed,
+	)
+
+	logger := s.config.logger
+
+	exporter := exporter.NewExporter(
+		s.config.registerer,
+		s.mapper,
+		logger,
+		eventsActions,
+		eventsUnmapped,
+		errorEventStats,
+		eventStats,
+		conflictingEventStats,
+		metricsCount,
+	)
+
+	go exporter.Listen(events)
+
+	parser := line.NewParser()
+	if s.config.dogstatsdTagsEnabled {
+		parser.EnableDogstatsdParsing()
+	}
+	if s.config.influxdbTagsEnabled {
+		parser.EnableInfluxdbParsing()
+	}
+	if s.config.libratoTagsEnabled {
+		parser.EnableLibratoParsing()
+	}
+	if s.config.signalFXTagsEnabled {
+		parser.EnableSignalFXParsing()
+	}
+
+	switch s.config.network {
+	case "udp":
+		udpListenAddr, err := address.UDPAddrFromString(s.config.address)
+		if err != nil {
+			return fmt.Errorf("invalid UDP listen address %w", err)
+		}
+
+		uconn, err := net.ListenUDP("udp", udpListenAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start UDP listener %w", err)
+		}
+
+		defer uconn.Close()
+
+		if s.config.readBuffer > 0 {
+			if err := uconn.SetReadBuffer(int(s.config.readBuffer)); err != nil {
+				return fmt.Errorf("error setting UDP read buffer %w", err)
+			}
+		}
+
+		ul := &listener.StatsDUDPListener{
+			Conn:            uconn,
+			EventHandler:    eventQueue,
+			Logger:          logger,
+			LineParser:      parser,
+			UDPPackets:      udpPackets,
+			LinesReceived:   linesReceived,
+			EventsFlushed:   eventsFlushed,
+			SampleErrors:    *sampleErrors,
+			SamplesReceived: samplesReceived,
+			TagErrors:       tagErrors,
+			TagsReceived:    tagsReceived,
+		}
+
+		s.address = uconn.LocalAddr()
+
+		ul.Listen()
+
+		return nil
+	default:
+		// should never happen
+		return fmt.Errorf("unsupported network %q", s.config.network)
+	}
 }
 
 var (
