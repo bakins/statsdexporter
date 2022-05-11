@@ -6,6 +6,10 @@ a library
 
 See [tests](./statsdexporter_test.go) for example usage.
 
+## Status
+
+Consider this beta quality.
+
 ## LICENSE
 
 See [LICENSE](./LICENSE)
